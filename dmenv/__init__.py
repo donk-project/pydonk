@@ -1,6 +1,9 @@
+from collections import defaultdict
 from collections.abc import Iterable
 from reprlib import recursive_repr
 from numbers import Number
+from typing import Any
+import uuid
 
 
 def FullyQualifiedPath(s: str) -> str:
@@ -20,10 +23,33 @@ def FullyQualifiedPath(s: str) -> str:
     return s
 
 
+class iota(object):
+    """Iota is the core class of all subtypes represented in the DM object tree.
+
+    It is largely concerned with the proper book-keeping of references to
+    objects that are deleted by a call to DM's core `del()` proc. `del()`
+    actually goes through every field of every known object, and every list, to
+    determine if a reference to the object exists. We just have the object track
+    these references.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._add_lists = set()
+        self._add_vars = defaultdict(set)
+        super().__init__(*args, **kwargs)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        x = super().__setattr__(name, value)
+        if isinstance(value, iota):
+            value._add_vars[self].add(name)
+        return x
+
+
 class dmlist_base(object):
     """A dmlist emulates the behavior of the "list" data structure in Dreammaker.
 
-    It is the worst data structure I have ever encountered in my life.
+    Every dmlist has an associated UUID used for hashing and comparing dmlist
+    references during object reference book-keeping.
 
     DM lists are 1-indexed.
     >>> l = dmlist_base()
@@ -75,6 +101,19 @@ class dmlist_base(object):
     >>> l == ["foo", "bar", "baz", "quux"]
     True
 
+    In-place removal only removes the last instance of an element. This behavior
+    gets weird when there are both associated and non-associated elements in the
+    list.
+    >>> l = dmlist_base(["foo", "bar", "baz", "foo"])
+    >>> l -= "foo"
+    >>> l == ["foo", "bar", "baz"]
+    True
+
+    >>> l = dmlist_base(["foo", "bar", "baz", "foo"])
+    >>> l -= dmlist_base(["foo"])
+    >>> l == ["foo", "bar", "baz"]
+    True
+
     DM lists support a handful of order-preserving set operations. The first is union:
     >>> l = dmlist_base([1, 2, 3])
     >>> m = dmlist_base([1, 5, 6])
@@ -100,9 +139,8 @@ class dmlist_base(object):
     >>> l == ["foo", "bar", "baz", "quux"]
     True
 
-    >>> class A: pass
     >>> l = dmlist()
-    >>> a = A()
+    >>> a = iota()
     >>> l |= a
     >>> l |= a
     >>> len(l) == 1
@@ -124,10 +162,20 @@ class dmlist_base(object):
     >>> l.Find("quux")
     0
 
+    >>> l = dmlist()
+    >>> l["a"] = 3
+    >>> l["b"] = 4
+    >>> l["c"] = 5
+    >>> i = iota()
+    >>> l["b"] = i
+    >>> l["b"] == i 
+    True
+
     TODO: Add more specific behavior checks
     """
 
     def __init__(self, keyvalues=None):
+        self.uuid = uuid.uuid4()
         self.keys = list()
         self.values = list()
         if keyvalues is None or len(keyvalues) == 0:
@@ -181,11 +229,16 @@ class dmlist_base(object):
             for idx, k in enumerate(self.keys):
                 if k == key_or_index:
                     found_key = True
-                    self.keys[idx]
+                    self.values[idx] = value
 
             if not found_key:
                 self.keys.append(key_or_index)
                 self.values.append(value)
+
+        if isinstance(key_or_index, iota):
+            key_or_index._add_lists.add(self)
+        if isinstance(value, iota):
+            value._add_lists.add(self)
 
         self._check_integrity()
 
@@ -205,6 +258,29 @@ class dmlist_base(object):
     def append(self, value, key=None):
         self.keys.append(key)
         self.values.append(value)
+        if isinstance(value, iota):
+            value._add_lists.add(self)
+        if isinstance(key, iota):
+            key._add_lists.add(self)
+
+    def _safe_duplicate(self):
+        result = dmlist()
+        result.keys = list(self.keys)
+        result.values = list(self.values)
+        for k in result.keys:
+            if isinstance(k, iota):
+                k._add_lists.add(result)
+        for v in result.values:
+            if isinstance(v, iota):
+                v._add_lists.add(result)
+
+        return result
+
+    def __hash__(self) -> int:
+        return self.uuid.int
+
+    def __eq__(self, o: object) -> bool:
+        return self.uuid == o.uuid
 
     def __bool__(self) -> bool:
         return len(self.values) > 0
@@ -217,7 +293,24 @@ class dmlist_base(object):
         return False
 
     def __add__(self, other):
-        self.__iadd__(other)
+        result = self._safe_duplicate()
+        if isinstance(other, dmlist_base):
+            other._check_integrity()
+            for i in range(len(other.keys)):
+                key = other.keys[i]
+                val = other.values[i]
+                if key is None:
+                    result.append(val)
+                else:
+                    result[key] = val
+        elif isinstance(other, Iterable):
+            for k in other:
+                result.append(k)
+        else:
+            result.append(other)
+
+        result._check_integrity()
+        return result
 
     def __iadd__(self, other):
         if isinstance(other, dmlist_base):
@@ -238,10 +331,79 @@ class dmlist_base(object):
         self._check_integrity()
         return self
 
+    def __sub__(self, other):
+        result = self._safe_duplicate()
+        if isinstance(other, dmlist_base):
+            other._check_integrity()
+            for i in range(len(other.keys)):
+                val = other.values[i]
+                result -= val
+                if isinstance(val, iota):
+                    val._add_lists.remove(result)
+        else:
+            if result.values.count(other):
+                # Get index of last matching value
+                idx = len(result.values) - 1 - result.values[::-1].index(other)
+                result.values.pop(idx)
+                result.keys.pop(idx)
+                # TODO: Since there may still be iota instances of the popped
+                # value/key in the list, after removing the last found value, we
+                # can't just remove result from the value and key's _add_lists.
+                # This is fine because del() will check the list and remove it
+                # from the _add_list, but there's probably a way to make it do
+                # less work.
+
+        return result
+
+    def __isub__(self, other):
+        if isinstance(other, dmlist_base):
+            other._check_integrity()
+            for i in range(len(other.keys)):
+                val = other.values[i]
+                self -= val
+                if isinstance(val, iota):
+                    val._add_lists.remove(self)
+        else:
+            if self.values.count(other):
+                # Get index of last matching value
+                idx = len(self.values) - 1 - self.values[::-1].index(other)
+                self.values.pop(idx)
+                self.keys.pop(idx)
+
+        return self
+
+    def __ior__(self, other):
+        if isinstance(other, dmlist_base):
+            for idx, other_key in enumerate(other.keys):
+                other_val = other.values[idx]
+                # print(f"idx={idx} other_key={other_key} other_val={other_val}")
+                # Keyless values
+                if other_key is None:
+                    if self._has_none_key_value(other_val):
+                        continue
+                    else:
+                        self.append(other_val)
+                else:
+                    if other_key not in self.keys:
+                        self.append(other_val, key=other_key)
+        elif isinstance(other, str) or isinstance(other, Number):
+            if other not in self.keys:
+                self.append(other)
+        elif isinstance(other, Iterable):
+            for idx, other_val in enumerate(other):
+                if self._has_none_key_value(other_val):
+                    continue
+                else:
+                    self.append(other_val)
+        else:
+            if other not in self.values:
+                self.append(other)
+
+        self._check_integrity()
+        return self
+
     def __or__(self, other):
-        result = dmlist_base()
-        result.keys = list(self.keys)
-        result.values = list(self.values)
+        result = self._safe_duplicate()
         if isinstance(other, dmlist_base):
             for idx, other_key in enumerate(other.keys):
                 other_val = other.values[idx]
@@ -275,7 +437,6 @@ class dmlist_base(object):
         return dmlist_repr(self)
 
     def __len__(self):
-        self._check_integrity()
         return len(self.keys)
 
     def __contains__(self, item):
@@ -352,3 +513,51 @@ def dmlist_repr(self):
 
 
 dmlist = dmlistType(str('dmlist'), (dmlist_base,), {"__repr__": dmlist_repr})
+
+
+def _del(obj: iota):
+    """_del is the replacement for DM's builtin proc `del()`.
+
+    When called, it uses the object's bookkeeping data to remove the object
+    itself from any dmlists or other objects that refer to it.
+
+    >>> i = iota()
+    >>> j = iota()
+    >>> i.foo = j
+    >>> _del(j)
+    >>> i.foo == None
+    True
+
+    >>> i = iota()
+    >>> l = dmlist()
+    >>> l.append(i)
+    >>> _del(i)
+    >>> l[1] == None
+    True
+
+    >>> l = dmlist()
+    >>> i = iota()
+    >>> l["a"] = i
+    >>> _del(i)
+    >>> l["a"] is None
+    True
+
+    """
+    for l in obj._add_lists:
+        l._check_integrity()
+        for i in range(len(l.keys)):
+            if l.values[i] == obj:
+                l.values[i] = None
+            if l.keys[i] == obj:
+                l.keys[i] = None
+                # In DM, the value of a deleted-object key is no longer
+                # accessible by indexing into the list with None
+                l.values[i] = None
+
+    obj._add_lists.clear()
+
+    for iota, varnames in obj._add_vars.items():
+        for varname in varnames:
+            iota.__setattr__(varname, None)
+
+    obj._add_vars.clear()

@@ -5,6 +5,8 @@ import pathlib
 
 from PIL import Image
 
+from dmenv import dmlist
+
 from api.constants import ICON_ADD, ICON_OVERLAY, ICON_SUBTRACT, ICON_UNDERLAY
 from api.constants import dirname as _d
 from iconparse.extractor import Extractor, ICON_ORDERING
@@ -116,34 +118,54 @@ class IconFrameset(object):
 
         raise IconManipulationError('could not find any frames')
 
-    def manipulate(self, operand_frames: IconFrameset, function=ICON_ADD, x=1, y=1):
+    def manipulate(self, operand_frames: IconFrameset, function=ICON_ADD, x=1, y=1, dirs=None):
         # TODO: Animations
         # TODO: other function modes
+        if dirs is None:
+            dirs = operand_frames.dirs()
+
+        # Under certain circumstances, we copy image data from one destination
+        # frameset to another, to become the template on which the source
+        # frameset applies its data.
+        #
+        # For example, when there is only one direction in the destination
+        # frameset, but four directions in the source frameset, the image data
+        # in the source frameset is copied to all other directions.
+        #
+        # TODO: Should this be comparing dirs.dircount() instead?
         if self.dircount() < operand_frames.dircount():
             self.extend_dircount(operand_frames.dircount())
 
         if function == ICON_OVERLAY:
-            for dir, images in self._frames.items():
-                src_frame = operand_frames.get_closest_frames(dir)[0]
-                results = [Image.alpha_composite(
-                    im, src_frame) for im in images]
-                self.set_frames(dir, results)
+            for dir in dirs:
+                images = self.get_frames(dir)
+                if dir in operand_frames.dirs():
+                    src_frame = operand_frames.get_frames(dir)[0]
+                    results = [Image.alpha_composite(
+                        im, src_frame) for im in images]
+                    self.set_frames(dir, results)
         elif function == ICON_UNDERLAY:
-            for dir, images in self._frames.items():
-                src_frame = operand_frames.get_closest_frames(dir)[0]
-                results = [Image.alpha_composite(
-                    src_frame, im) for im in images]
-                self.set_frames(dir, results)
+            for dir in dirs:
+                images = self.get_frames(dir)
+                if dir in operand_frames.dirs():
+                    src_frame = operand_frames.get_frames(dir)[0]
+                    results = [Image.alpha_composite(
+                        src_frame, im) for im in images]
+                    self.set_frames(dir, results)
         elif function == ICON_ADD:
-            for dir, images in self._frames.items():
-                src_frame = operand_frames.get_closest_frames(dir)[0]
-                self.set_frames(dir, [dm_icon_add(x, src_frame)
-                                for x in images])
+            for dir in dirs:
+                images = self.get_frames(dir)
+                if dir in operand_frames.dirs():
+                    src_frame = operand_frames.get_frames(dir)[0]
+                    self.set_frames(dir, [dm_icon_add(x, src_frame)
+                                    for x in images])
         elif function == ICON_SUBTRACT:
-            for dir, images in self._frames.items():
-                src_frame = operand_frames.get_closest_frames(dir)[0]
-                self.set_frames(dir, [dm_icon_sub(x, src_frame)
-                                for x in images])
+            for dir in dirs:
+                images = self.get_frames(dir)
+                if dir in operand_frames.dirs():
+                    src_frame = operand_frames.get_closest_frames(dir)[0]
+                    self.set_frames(dir, [dm_icon_sub(x, src_frame)
+                                    for x in images])
         else:
             raise IconManipulationError(f'unsupported blend mode {function}')
 
@@ -402,7 +424,7 @@ class icon(object):
 
     def __init__(self, data_source=None,
                  icon_state=ExtractRules.LOAD_ALL_ICON_STATES,
-                 dir=None, frame=None, moving=None):
+                 dir=None, frame=None, moving=None, as_hard_copy=False):
 
         self._extract_rules: ExtractRules = ExtractRules(
             icon_state, dir, frame, moving)
@@ -423,6 +445,8 @@ class icon(object):
         elif isinstance(data_source, str):
             self._catalog: Catalog = DmiCatalog(
                 self._envroot, data_source)
+        elif as_hard_copy:
+            return
         else:
             raise IconManipulationError(
                 f'data_source is {data_source!r}, not icon or str')
@@ -459,9 +483,17 @@ class icon(object):
                     # perform blending with no operator image data.
                     return
 
+                dirs = None
+                if self._extract_rules.is_dir_restricted():
+                    if input._extract_rules.is_dir_restricted():
+                        if self._extract_rules.get_dir_restriction() == input._extract_rules.get_dir_restriction():
+                            dirs = [self._extract_rules.get_dir_restriction()]
+                    else:
+                        dirs = operand_frames.dirs()
+
                 dest_frameset = self._catalog.get_frameset(
                     self._extract_rules.get_state_name_restriction())
-                dest_frameset.manipulate(operand_frames, function, x, y)
+                dest_frameset.manipulate(operand_frames, function, x, y, dirs=dirs)
 
         elif isinstance(input, str):
             operand_frames = IconFrameset.FromColor(input)
@@ -532,8 +564,6 @@ class icon(object):
 
         src_frameset = new_icon._catalog.get_frameset(source_state)
 
-        print(
-            f'Insert:\n           {source_state!r} in {new_icon}\n           to {icon_state!r} in {self} dir={_d(dir)} dirs={_d(dirs)}')
         for d in dirs:
             src_frame = src_frameset.get_frames(d)[frame - 1]
             if dest_frameset.has_dir(d):
@@ -544,7 +574,54 @@ class icon(object):
                     cur_frames[frame - 1] = src_frame
             else:
                 dest_frameset.set_frames(d, [src_frame])
-        print('\n')
+            dest_frameset.set_frames(d, [src_frame])
+
+    def hard_copy(self) -> icon:
+        """
+        Hard copy copies all frameset image data and returns an icon with those
+        copied framesets applied.
+        """
+        result = icon(as_hard_copy=True)
+        if len(result._catalog.get_current_state_names()) > 0:
+            raise IconManipulationError(
+                'hard copy of icon still has old states')
+        for state_name in self._catalog.get_available_state_names():
+            src_frameset = self._catalog.get_frameset(state_name)
+            dest_frameset = result._catalog.add(src_frameset)
+            for d in src_frameset.dirs():
+                dest_frameset.set_frames([im.copy()
+                                         for im in src_frameset.get_frames(d)])
+
+
+class overlay_list(dmlist):
+    """
+    Overlays are stored in lists with slightly different semantics than normal.
+
+    BYOND places even more restrictions on accessing elements within the list
+    but we ignore those to make debugging easier and it's Python anyway.
+
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key_or_index, value):
+        if isinstance(key_or_index, icon):
+            key_or_index = key_or_index.hard_copy()
+        if isinstance(value, icon):
+            value = value.hard_copy()
+
+        super().__setitem__(key_or_index, value)
+
+    def append(self, value, key=None):
+        if isinstance(value, icon):
+            value = value.hard_copy()
+        if isinstance(key, icon):
+            # This probably never happens?
+            key = key.hard_copy()
+
+        super().append(value, key)
+
 
 # From the BYOND reference on /icon/proc/Blend:
 #

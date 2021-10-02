@@ -171,6 +171,16 @@ class dmlist_base(object):
     >>> l["b"] == i 
     True
 
+    Containment checks apply to keys, and non-key values, only.
+    >>> l = dmlist["foo": "bar"]
+    >>> "foo" in l
+    True
+    >>> "bar" in l
+    False
+    >>> l = dmlist["foo"]
+    >>> "foo" in l
+    True
+
     TODO: Add more specific behavior checks
     """
 
@@ -218,6 +228,18 @@ class dmlist_base(object):
 
     def __iter__(self):
         return iter([self.values[idx] if self.keys[idx] is None else self.keys[idx] for idx in range(len(self.keys))])
+
+    def __contains__(self, item):
+        for idx in range(len(self.keys)):
+            k = self.keys[idx]
+            v = self.values[idx]
+            if k is None:
+                if item == v:
+                    return True
+            elif item == k:
+                return True
+
+        return False
 
     def __setitem__(self, key_or_index, value):
         if isinstance(key_or_index, Number):
@@ -439,9 +461,6 @@ class dmlist_base(object):
     def __len__(self):
         return len(self.keys)
 
-    def __contains__(self, item):
-        return item in self.keys
-
     def clear(self):
         self.keys.clear()
         self.values.clear()
@@ -488,16 +507,44 @@ class dmlistType(type):
     >>> l = dmlist.newlist(int, str)
     >>> l == [0, ""]
     True
+
+    While integers are not allowed as dmlist keys, a special constructor syntax
+    is supported where the values are simply monotonically increasing integers.
+    This syntax is called an "integer map" below, and is encountered
+    occasionally in SS13 codebases.
+    >>> l = dmlist[1: "abc", 2: "def"]
+    >>> l[1] == "abc"
+    True
+
+    If a single string element is passed to the constructor, do not consider it
+    a list of characters, as Python would.
+    >>> l = dmlist["test"]
+    >>> l[1] == "test"
+    True
+    >>> "test" in l
+    True
     """
     syntax_error = SyntaxError(
         "Allowed syntax: dmlist[<k>: <v>(, <k>: <v>...)]")
 
     def __getitem__(self, keys):
-        if isinstance(keys, slice):
-            keys = (keys,)
         od = self()
+
+        if isinstance(keys, slice) or isinstance(keys, type):
+            keys = (keys,)
+        elif isinstance(keys, str):
+            od.append(keys)
+            return od
+
+        test_keys = [k.start for k in keys if isinstance(k, slice)]
+        is_integer_keys = all([isinstance(k, int) for k in test_keys])
+        is_natural_order = test_keys == list(range(1, len(keys) + 1))
+        is_integer_map = is_integer_keys and is_natural_order
+
         for k in keys:
-            if isinstance(k, slice) and k.step is None:
+            if is_integer_map:
+                od.append(k.stop)
+            elif isinstance(k, slice) and k.step is None:
                 od[k.start] = k.stop
             else:
                 od.append(k)

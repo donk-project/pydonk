@@ -1,3 +1,6 @@
+# Donk Project
+# Copyright (c) 2021 Warriorstar Orion <orion@snowfrost.garden>
+# SPDX-License-Identifier: MIT
 from collections import defaultdict
 from collections.abc import Iterable
 from reprlib import recursive_repr
@@ -36,6 +39,7 @@ class iota(object):
     def __init__(self, *args, **kwargs):
         self._add_lists = set()
         self._add_vars = defaultdict(set)
+        self._initials = dict()
         super().__init__(*args, **kwargs)
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -603,8 +607,8 @@ def _del(obj: iota):
 
     obj._add_lists.clear()
 
-    for iota, varnames in obj._add_vars.items():
+    for i, varnames in obj._add_vars.items():
         for varname in varnames:
-            iota.__setattr__(varname, None)
+            i.__setattr__(varname, None)
 
     obj._add_vars.clear()

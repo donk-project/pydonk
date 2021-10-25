@@ -15,10 +15,11 @@ tile_datum     : (treepath | treepath datum_props)
 treepath       : ("/" CNAME)+
 datum_props    : "{" datum_prop (";" datum_prop)* "}"
 datum_prop     : CNAME "=" prop_value
-prop_value     : dmlist | SIGNED_INT | INT | FLOAT | STRING | treepath | NULL | resource
+prop_value     : dmlist | newlist | SIGNED_INT | INT | FLOAT | STRING | treepath | NULL | resource
 dmlist         : "list(" (prop_value | kv_pair) ("," (prop_value | kv_pair))* ")"
+newlist        : "newlist(" (prop_value | kv_pair) ("," (prop_value | kv_pair))* ")"
 resource       : /'((?:.(?!(?<![\\\\])'))*.?)'/
-kv_pair        : STRING "=" prop_value
+kv_pair        : (treepath | STRING) "=" prop_value
 dmm_key        : CNAME
 NULL           : "null"
 dmm_map        : dmm_row*
@@ -58,6 +59,9 @@ class path(object):
         if isinstance(o, str):
             return self.path == o
 
+    def __hash__(self) -> int:
+        return hash(self.path)
+
     def startswith(self, k):
         return self.path.startswith(k)
 
@@ -78,6 +82,9 @@ class Tile(object):
             d['values'] = dict()
         d['values'][k] = v
 
+    def get_datum_name(self, datum_idx):
+        return self.d[datum_idx]['name']
+
     def get_value(self, datum_idx, k):
         return self.d[datum_idx]['values'][k]
 
@@ -94,25 +101,6 @@ class Tile(object):
 
         for idx in sorted(dels, reverse=True):
             self.d.pop(idx)
-
-
-class Reader:
-    def __init__(self, dmm_filename):
-        self.dmm_filename = dmm_filename
-        self.parser = Lark(DMM_GRAMMAR, parser='lalr',
-                           start="start", transformer=TreeToDmmData())
-        self.parsed = False
-
-    def Read(self):
-        if self.parsed:
-            raise RuntimeError("DMM already parsed")
-
-        dmm_data = open(self.dmm_filename).read()
-
-        data = self.parser.parse(dmm_data)
-        self.parsed = True
-
-        return data
 
 
 class TreeToDmmData(Transformer):
@@ -191,3 +179,22 @@ class TreeToDmmData(Transformer):
     def dmm_row(self, sk):
         coords = tuple(sk[:3])
         self.map[coords] = sk[3:]
+
+
+class Reader:
+    def __init__(self, dmm_filename):
+        self.dmm_filename = dmm_filename
+        self.parser = Lark(DMM_GRAMMAR, parser='lalr',
+                           start="start", transformer=TreeToDmmData())
+        self.parsed = False
+
+    def Read(self) -> TreeToDmmData:
+        if self.parsed:
+            raise RuntimeError("DMM already parsed")
+
+        dmm_data = open(self.dmm_filename).read()
+
+        data = self.parser.parse(dmm_data)
+        self.parsed = True
+
+        return data

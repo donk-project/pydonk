@@ -63,12 +63,22 @@ class path(object):
         return hash(self.path)
 
     def startswith(self, k):
-        return self.path.startswith(k)
+        return self.path.startswith(str(k))
 
 
 class Tile(object):
     def __init__(self, d):
         self.d = d
+
+    def get_area_path(self):
+        for datum in self.d:
+            if datum['name'].startswith('/area/'):
+                return datum['name']
+
+    def get_turf_path(self):
+        for datum in self.d:
+            if datum['name'].startswith('/turf/'):
+                return datum['name']
 
     def get_datums_with_prefix(self, prefix):
         return [idx for idx, datum in enumerate(self.d) if datum['name'].startswith(prefix)]
